@@ -106,5 +106,7 @@ def get_parser(description=None):
                         help="use generator for training and validation data")
     parser.add_argument("--shuffle", action="store_true",
                         help="shuffle training data every epoch if not using generator")
+    parser.add_argument("--use_combo_score", action="store_true",
+                        help="use combination score in place of percent growth in response data")
 
     return parser

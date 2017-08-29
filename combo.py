@@ -108,8 +108,8 @@ class ComboDataLoader(object):
 
     def __init__(self, seed, val_split=0.2, shuffle=True,
                  cell_features=['expression'], drug_features=['descriptors'],
-                 use_landmark_genes=False, feature_subsample=None,
-                 scaling='std', scramble=False):
+                 use_landmark_genes=False, use_combo_score=False,
+                 feature_subsample=None, scaling='std', scramble=False):
         """Initialize data merging drug response, drug descriptors and cell line essay.
            Shuffle and split training and validation set
 
@@ -135,13 +135,15 @@ class ComboDataLoader(object):
             number of feature columns to use from cellline expressions and drug descriptors
         use_landmark_genes: True or False
             only use LINCS1000 landmark genes
+        use_combo_score: bool (default False)
+            use combination score in place of percent growth (stored in 'GROWTH' column)
         scaling: None, 'std', 'minmax' or 'maxabs' (default 'std')
             type of feature scaling: 'maxabs' to [-1,1], 'maxabs' to [-1, 1], 'std' for standard normalization
         """
 
         np.random.seed(seed)
 
-        df = NCI60.load_combo_response(fraction=True)
+        df = NCI60.load_combo_response(use_combo_score=use_combo_score, fraction=True)
         logger.info('Loaded {} unique (CL, D1, D2) response sets.'.format(df.shape[0]))
 
         if 'all' in cell_features:
@@ -197,6 +199,11 @@ class ComboDataLoader(object):
                 self.df_drug_rand = df_rand.reset_index()
 
         logger.info('Filtered down to {} rows with matching information.'.format(df.shape[0]))
+
+        logger.info('Unique cell lines: {}'.format(df['CELLNAME'].nunique()))
+        logger.info('Unique drugs: {}'.format(df['NSC1'].nunique()))
+        df.to_csv('filtered.growth.min.tsv', sep='\t')
+        # df.to_csv('filtered.score.max.tsv', sep='\t')
 
         if shuffle:
             df = df.sample(frac=1.0, random_state=seed)
@@ -440,7 +447,8 @@ def main():
     loader = ComboDataLoader(seed=args.seed,
                              cell_features=args.cell_features,
                              drug_features=args.drug_features,
-                             use_landmark_genes=args.use_landmark_genes)
+                             use_landmark_genes=args.use_landmark_genes,
+                             use_combo_score=args.use_combo_score)
     # test_loader(loader)
     # test_generator(loader)
 
