@@ -5,6 +5,7 @@ from __future__ import division, print_function
 import collections
 import logging
 import os
+import random
 import threading
 
 import numpy as np
@@ -18,6 +19,8 @@ from keras import optimizers
 from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, TensorBoard
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from scipy.stats.stats import pearsonr
 
 import matplotlib as mpl
 mpl.use('Agg')
@@ -35,7 +38,6 @@ def set_seed(seed):
     os.environ['PYTHONHASHSEED'] = '0'
     np.random.seed(seed)
 
-    import random
     random.seed(seed)
 
     if K.backend() == 'tensorflow':
@@ -91,8 +93,8 @@ def extension_from_parameters(args):
         ext += '.res'
     if args.use_landmark_genes:
         ext += '.L1000'
-    if args.no_gen:
-        ext += '.ng'
+    if args.gen:
+        ext += '.gen'
     for i, n in enumerate(args.dense_layers):
         if n > 0:
             ext += '.D{}={}'.format(i+1, n)
@@ -346,6 +348,20 @@ def mae(y_true, y_pred):
     return keras.metrics.mean_absolute_error(y_true, y_pred)
 
 
+def evaluate_prediction(y_true, y_pred):
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+    corr, _ = pearsonr(y_true, y_pred)
+    return {'mse': mse, 'mae': mae, 'r2': r2, 'corr': corr}
+
+
+def log_evaluation(metric_outputs, description='Comparing y_true and y_pred:'):
+    logger.info(description)
+    for metric, value in metric_outputs.items():
+        logger.info('  {}: {:.4f}'.format(metric, value))
+
+
 class LoggingCallback(Callback):
     def __init__(self, print_fcn=print):
         Callback.__init__(self)
@@ -362,7 +378,7 @@ class LossHistory(Callback):
         self.best_val_loss = np.Inf
         self.best_model = None
 
-    def on_batch_end(self, batch, logs={}):
+    def on_epoch_end(self, batch, logs={}):
         val_loss = logs.get('val_loss')
         self.val_losses.append(val_loss)
         if val_loss < self.best_val_loss:
@@ -476,22 +492,30 @@ def main():
     if args.tb:
         callbacks.append(tensorboard)
 
-    if args.no_gen:
+    if args.gen:
+        model.fit_generator(train_gen, train_steps,
+                            epochs=args.epochs,
+                            callbacks=callbacks,
+                            validation_data=val_gen, validation_steps=val_steps)
+    else:
         x_train_list, y_train, x_val_list, y_val = loader.load_data()
+        y_shuf = np.random.permutation(y_val)
+        log_evaluation(evaluate_prediction(y_val, y_shuf),
+                       description='Between random pairs in y_val:')
         model.fit(x_train_list, y_train,
                   batch_size=args.batch_size,
                   shuffle=args.shuffle,
                   epochs=args.epochs,
                   callbacks=callbacks,
                   validation_data=(x_val_list, y_val))
-    else:
-        model.fit_generator(train_gen, train_steps,
-                            epochs=args.epochs,
-                            callbacks=callbacks,
-                            validation_data=val_gen, validation_steps=val_steps)
+
+    best_model = history.best_model
+    if not args.gen:
+        y_val_pred = model.predict(x_val_list, batch_size=args.batch_size).flatten()
+        log_evaluation(evaluate_prediction(y_val, y_val_pred))
 
     if args.cp:
-        history.best_model.save(prefix+'.model.h5')
+        best_model.save(prefix+'.model.h5')
 
     logger.handlers = []
 
