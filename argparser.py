@@ -102,5 +102,9 @@ def get_parser(description=None):
                         help="dose response subsample strategy; 'none' or 'naive_balancing'")
     parser.add_argument("--use_landmark_genes", action="store_true",
                         help="use the 978 landmark genes from LINCS (L1000) as expression features")
+    parser.add_argument("--no_gen", action="store_true",
+                        help="load training and validation data to memory")
+    parser.add_argument("--shuffle", action="store_true",
+                        help="shuffle training data every epoch if not using generator")
 
     return parser

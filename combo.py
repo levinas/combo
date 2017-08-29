@@ -40,10 +40,10 @@ def set_seed(seed):
 
     if K.backend() == 'tensorflow':
         import tensorflow as tf
-        session_conf = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1)
         tf.set_random_seed(seed)
-        sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
-        K.set_session(sess)
+        # session_conf = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1)
+        # sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
+        # K.set_session(sess)
 
 
 def verify_path(path):
@@ -238,6 +238,33 @@ class ComboDataLoader(object):
         self.input_dim = sum([np.prod(self.feature_shapes[x]) for x in self.input_features.values()])
         logger.info('Total input dimensions: {}'.format(self.input_dim))
 
+    def load_data(self):
+        df_train = self.df_response.iloc[:self.n_train, :]
+        df_val = self.df_response.iloc[self.n_train:, :]
+
+        y_train = df_train['GROWTH'].values
+        y_val = df_val['GROWTH'].values
+
+        x_train_list = []
+        x_val_list = []
+
+        for fea in self.cell_features:
+            df_cell = getattr(self, self.cell_df_dict[fea])
+            df_x_train = pd.merge(df_train[['CELLNAME']], df_cell, on='CELLNAME', how='left')
+            df_x_val = pd.merge(df_val[['CELLNAME']], df_cell, on='CELLNAME', how='left')
+            x_train_list.append(df_x_train.drop(['CELLNAME'], axis=1).values)
+            x_val_list.append(df_x_val.drop(['CELLNAME'], axis=1).values)
+
+        for drug in ['NSC1', 'NSC2']:
+            for fea in self.drug_features:
+                df_drug = getattr(self, self.drug_df_dict[fea])
+                df_x_train = pd.merge(df_train[[drug]], df_drug, left_on=drug, right_on='NSC', how='left')
+                df_x_val = pd.merge(df_val[[drug]], df_drug, left_on=drug, right_on='NSC', how='left')
+                x_train_list.append(df_x_train.drop([drug, 'NSC'], axis=1).values)
+                x_val_list.append(df_x_val.drop([drug, 'NSC'], axis=1).values)
+
+        return x_train_list, y_train, x_val_list, y_val
+
 
 class ComboDataGenerator(object):
     """Generate training, validation or testing batches from loaded data
@@ -294,6 +321,29 @@ def test_generator(loader):
     print(y.shape)
 
 
+def test_loader(loader):
+    x_train_list, y_train, x_val_list, y_val = loader.load_data()
+    print('x_train shapes:')
+    for x in x_train_list:
+        print(x.shape)
+    print('y_train shape:', y_train.shape)
+
+    print('x_val shapes:')
+    for x in x_val_list:
+        print(x.shape)
+    print('y_val shape:', y_val.shape)
+
+
+def r2(y_true, y_pred):
+    SS_res =  K.sum(K.square(y_true - y_pred))
+    SS_tot = K.sum(K.square(y_true - K.mean(y_true)))
+    return (1 - SS_res/(SS_tot + K.epsilon()))
+
+
+def mae(y_true, y_pred):
+    return keras.metrics.mean_absolute_error(y_true, y_pred)
+
+
 class LoggingCallback(Callback):
     def __init__(self, print_fcn=print):
         Callback.__init__(self)
@@ -333,13 +383,8 @@ def main():
     logger.info(args)
 
     loader = ComboDataLoader(seed=args.seed, use_landmark_genes=args.use_landmark_genes)
+    # test_loader(loader)
     # test_generator(loader)
-
-    batch_size = 32
-    dense_layers = [1000, 1000]
-    residual = True
-    activation = 'relu'
-    epochs = 10
 
     train_gen = ComboDataGenerator(loader, batch_size=args.batch_size).flow()
     val_gen = ComboDataGenerator(loader, partition='val', batch_size=args.batch_size).flow()
@@ -349,7 +394,7 @@ def main():
 
     input_models = {}
     for fea_type, shape in loader.feature_shapes.items():
-        box = build_feature_model(input_shape=shape, name=fea_type)
+        box = build_feature_model(input_shape=shape, name=fea_type, dense_layers=args.dense_layers)
         box.summary()
         input_models[fea_type] = box
 
@@ -389,7 +434,7 @@ def main():
     if args.learning_rate:
         K.set_value(optimizer.lr, args.learning_rate)
 
-    model.compile(loss=args.loss, optimizer=optimizer)
+    model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
 
     def warmup_scheduler(epoch):
         lr = args.learning_rate or base_lr * args.batch_size/100
@@ -414,8 +459,19 @@ def main():
     if args.tb:
         callbacks.append(tensorboard)
 
-    model.fit_generator(train_gen, train_steps, epochs=epochs,
-                        validation_data=val_gen, validation_steps=val_steps)
+    if args.no_gen:
+        x_train_list, y_train, x_val_list, y_val = loader.load_data()
+        model.fit(x_train_list, y_train,
+                  batch_size=args.batch_size,
+                  shuffle=args.shuffle,
+                  epochs=args.epochs,
+                  callbacks=callbacks,
+                  validation_data=(x_val_list, y_val))
+    else:
+        model.fit_generator(train_gen, train_steps,
+                            epochs=args.epochs,
+                            callbacks=callbacks,
+                            validation_data=val_gen, validation_steps=val_steps)
 
     if args.cp:
         model.save(prefix+'.model.h5')
