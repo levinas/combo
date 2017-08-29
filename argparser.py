@@ -34,8 +34,8 @@ def get_parser(description=None):
                         choices=['expression', 'mirna', 'proteome', 'all', 'expression_5platform', 'categorical'],
                         help="use one or more cell line feature sets: 'expression', 'mirna', 'proteome', 'all'; use all for ['expression', 'mirna', 'proteome']; use 'categorical' for one-hot encoded cell lines")
     parser.add_argument("--drug_features", nargs='+', default=DRUG_FEATURES, metavar='DRUG_FEATURES',
-                        choices=['descriptors', 'latent', 'all', 'noise'],
-                        help="use dragon7 descriptors, latent representations from Aspuru-Guzik's SMILES autoencoder, or both, or random features; 'descriptors','latent', 'all', 'noise'")
+                        choices=['descriptors', 'latent', 'all', 'categorical', 'noise'],
+                        help="use dragon7 descriptors, latent representations from Aspuru-Guzik's SMILES autoencoder, or both, or one-hot encoded drugs, or random features; 'descriptors','latent', 'all', 'categorical', 'noise'")
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='increase output verbosity')
     parser.add_argument('-a', '--activation',
