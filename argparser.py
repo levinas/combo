@@ -3,7 +3,7 @@ import argparse
 
 CELL_FEATURES = ['expression']
 DRUG_FEATURES = ['descriptors']
-CV = 5
+CV = 1
 FEATURE_SUBSAMPLE = 0
 LOGCONC = -4.0
 MIN_LOGCONC = -5.0

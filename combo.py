@@ -204,8 +204,8 @@ class ComboDataLoader(object):
 
         logger.info('Unique cell lines: {}'.format(df['CELLNAME'].nunique()))
         logger.info('Unique drugs: {}'.format(df['NSC1'].nunique()))
-        df.to_csv('filtered.growth.min.tsv', sep='\t')
-        # df.to_csv('filtered.score.max.tsv', sep='\t')
+        # df.to_csv('filtered.growth.min.tsv', sep='\t', index=False, float_format='%.4g')
+        # df.to_csv('filtered.score.max.tsv', sep='\t', index=False, float_format='%.4g')
 
         if shuffle:
             df = df.sample(frac=1.0, random_state=seed)
@@ -285,7 +285,7 @@ class ComboDataLoader(object):
                 x_train_list.append(df_x_train.drop([drug, 'NSC'], axis=1).values)
                 x_val_list.append(df_x_val.drop([drug, 'NSC'], axis=1).values)
 
-        return x_train_list, y_train, x_val_list, y_val
+        return x_train_list, y_train, x_val_list, y_val, df_train, df_val
 
 
 class ComboDataGenerator(object):
@@ -434,32 +434,7 @@ def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
     return model
 
 
-def main():
-    description = 'Build neural network based models to predict tumor response to drug pairs.'
-    parser = argparser.get_parser(description)
-    args = parser.parse_args()
-
-    set_seed(args.seed)
-    ext = extension_from_parameters(args)
-    prefix = args.save + ext
-    logfile = args.logfile if args.logfile else prefix+'.log'
-    set_up_logger(logfile, args.verbose)
-    logger.info(args)
-
-    loader = ComboDataLoader(seed=args.seed,
-                             cell_features=args.cell_features,
-                             drug_features=args.drug_features,
-                             use_landmark_genes=args.use_landmark_genes,
-                             use_combo_score=args.use_combo_score)
-    # test_loader(loader)
-    # test_generator(loader)
-
-    train_gen = ComboDataGenerator(loader, batch_size=args.batch_size).flow()
-    val_gen = ComboDataGenerator(loader, partition='val', batch_size=args.batch_size).flow()
-
-    train_steps = int(loader.n_train / args.batch_size)
-    val_steps = int(loader.n_val / args.batch_size)
-
+def build_model(loader, args):
     input_models = {}
     for fea_type, shape in loader.feature_shapes.items():
         box = build_feature_model(input_shape=shape, name=fea_type, dense_layers=args.dense_layers)
@@ -489,7 +464,36 @@ def main():
                 pass
     output = Dense(1)(h)
 
-    model = Model(inputs, output)
+    return Model(inputs, output)
+
+
+def main():
+    description = 'Build neural network based models to predict tumor response to drug pairs.'
+    parser = argparser.get_parser(description)
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+    ext = extension_from_parameters(args)
+    prefix = args.save + ext
+    logfile = args.logfile if args.logfile else prefix+'.log'
+    set_up_logger(logfile, args.verbose)
+    logger.info(args)
+
+    loader = ComboDataLoader(seed=args.seed,
+                             cell_features=args.cell_features,
+                             drug_features=args.drug_features,
+                             use_landmark_genes=args.use_landmark_genes,
+                             use_combo_score=args.use_combo_score)
+    # test_loader(loader)
+    # test_generator(loader)
+
+    train_gen = ComboDataGenerator(loader, batch_size=args.batch_size).flow()
+    val_gen = ComboDataGenerator(loader, partition='val', batch_size=args.batch_size).flow()
+
+    train_steps = int(loader.n_train / args.batch_size)
+    val_steps = int(loader.n_val / args.batch_size)
+
+    model = build_model(loader, args)
     model.summary()
 
     if args.cp:
@@ -513,7 +517,7 @@ def main():
 
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
     warmup_lr = LearningRateScheduler(warmup_scheduler)
-    checkpointer = ModelCheckpoint(args.save+ext+'.weights.h5', save_best_only=True, save_weights_only=True)
+    checkpointer = ModelCheckpoint(prefix+'.weights.h5', save_best_only=True, save_weights_only=True)
     tensorboard = TensorBoard(log_dir="tb/tb{}".format(ext))
     history_logger = LoggingCallback(logger.debug)
     model_recorder = ModelRecorder()
@@ -534,7 +538,7 @@ def main():
                                       callbacks=callbacks,
                                       validation_data=val_gen, validation_steps=val_steps)
     else:
-        x_train_list, y_train, x_val_list, y_val = loader.load_data()
+        x_train_list, y_train, x_val_list, y_val, df_train, df_val = loader.load_data()
         y_shuf = np.random.permutation(y_val)
         log_evaluation(evaluate_prediction(y_val, y_shuf),
                        description='Between random pairs in y_val:')
@@ -549,6 +553,7 @@ def main():
     if not args.gen:
         y_val_pred = best_model.predict(x_val_list, batch_size=args.batch_size).flatten()
         log_evaluation(evaluate_prediction(y_val, y_val_pred))
+        df_val['GROWTH_PRED'] = y_val_pred
 
     if args.cp:
         best_model.save(prefix+'.model.h5')
