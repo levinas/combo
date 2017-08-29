@@ -123,9 +123,10 @@ class ComboDataLoader(object):
             use one or more cell line feature sets: gene expression, microRNA, proteome
             use 'all' for ['expression', 'mirna', 'proteome']
             use 'categorical' for one-hot encoded cell lines
-        drug_features: list of strings from 'descriptors', 'latent', 'all', 'noise' (default ['descriptors'])
+        drug_features: list of strings from 'descriptors', 'latent', 'all', 'categorical', 'noise' (default ['descriptors'])
             use dragon7 descriptors, latent representations from Aspuru-Guzik's SMILES autoencoder
             trained on NSC drugs, or both; use random features if set to noise
+            use 'categorical' for one-hot encoded drugs
         shuffle : True or False, optional (default True)
             if True shuffles the merged data before splitting training and validation sets
         scramble: True or False, optional (default False)
@@ -180,6 +181,13 @@ class ComboDataLoader(object):
             elif fea == 'latent':
                 self.df_drug_auen = NCI60.load_drug_autoencoded_AG(ncols=feature_subsample, scaling=scaling)
                 df = df[df['NSC1'].isin(self.df_drug_auen['NSC']) & df['NSC2'].isin(self.df_drug_auen['NSC'])]
+            elif fea == 'categorical':
+                df_drug_ids = df[['NSC1']].drop_duplicates()
+                df_drug_ids.columns = ['NSC']
+                drug_ids = df_drug_ids['NSC']
+                df_drug_cat = pd.get_dummies(drug_ids)
+                df_drug_cat.index = df_drug_ids['NSC']
+                self.df_drug_cat = df_drug_cat.reset_index()
             elif fea == 'noise':
                 df_drug_ids = df[['NSC1']].drop_duplicates()
                 df_drug_ids.columns = ['NSC']
@@ -216,6 +224,7 @@ class ComboDataLoader(object):
 
         self.drug_df_dict = {'descriptors': 'df_drug_desc',
                              'latent': 'df_drug_auen',
+                             'categorical': 'df_drug_cat',
                              'noise': 'df_drug_rand'}
 
         self.input_features = collections.OrderedDict()
@@ -365,13 +374,13 @@ def log_evaluation(metric_outputs, description='Comparing y_true and y_pred:'):
 def plot_history(out, history, metric='loss', title=None):
     title = title or 'model {}'.format(metric)
     val_metric = 'val_{}'.format(metric)
-    plt.figure(figsize=(16, 9))
-    plt.plot(history.history[metric])
-    plt.plot(history.history[val_metric])
+    plt.figure(figsize=(8, 6))
+    plt.plot(history.history[metric], marker='o')
+    plt.plot(history.history[val_metric], marker='d')
     plt.title(title)
     plt.ylabel(metric)
     plt.xlabel('epoch')
-    plt.legend(['train', 'test'], loc='upper left')
+    plt.legend(['train_{}'.format(metric), 'val_{}'.format(metric)], loc='upper center')
     png = '{}.plot.{}.png'.format(out, metric)
     plt.savefig(png, bbox_inches='tight')
 
@@ -428,7 +437,10 @@ def main():
     set_up_logger(logfile, args.verbose)
     logger.info(args)
 
-    loader = ComboDataLoader(seed=args.seed, use_landmark_genes=args.use_landmark_genes)
+    loader = ComboDataLoader(seed=args.seed,
+                             cell_features=args.cell_features,
+                             drug_features=args.drug_features,
+                             use_landmark_genes=args.use_landmark_genes)
     # test_loader(loader)
     # test_generator(loader)
 
@@ -525,7 +537,7 @@ def main():
 
     best_model = model_recorder.best_model
     if not args.gen:
-        y_val_pred = model.predict(x_val_list, batch_size=args.batch_size).flatten()
+        y_val_pred = best_model.predict(x_val_list, batch_size=args.batch_size).flatten()
         log_evaluation(evaluate_prediction(y_val, y_val_pred))
 
     if args.cp:

@@ -120,16 +120,17 @@ def load_combo_response(min_logconc=-4., max_logconc=-4., subsample=None, fracti
     df = global_cache.get(path)
     if df is None:
         df = pd.read_csv(path, sep='\t',
-                         usecols=['CELLNAME', 'NSC1', 'CONC1', 'NSC2', 'CONC2', 'PERCENTGROWTH', 'VALID'],
+                         usecols=['CELLNAME', 'NSC1', 'CONC1', 'NSC2', 'CONC2', 'PERCENTGROWTH', 'VALID', 'SCORE'],
                          na_values=['na','-',''],
-                         dtype={'NSC1':object, 'NSC2':object, 'CONC1':object, 'CONC2':object, 'PERCENTGROWTH':str },
+                         dtype={'NSC1':object, 'NSC2':object, 'CONC1':object, 'CONC2':object, 'PERCENTGROWTH':str},
                          engine='c', error_bad_lines=False, warn_bad_lines=True)
                          # nrows=10000)
         global_cache[path] = df
 
     df = df[(df['VALID'] == 'Y')]
-    df = df[['CELLNAME', 'NSC1', 'NSC2', 'PERCENTGROWTH']]
+    df = df[['CELLNAME', 'NSC1', 'NSC2', 'PERCENTGROWTH', 'SCORE']]
     df['PERCENTGROWTH'] = df['PERCENTGROWTH'].astype(np.float32)
+    df['SCORE'] = df['SCORE'].astype(np.float32)
     df['NSC2'] = df['NSC2'].fillna(df['NSC1'])
     df = df.groupby(['CELLNAME', 'NSC1', 'NSC2']).min()
     df = df.add_suffix('_MIN').reset_index()  # add PERCENTGROWTH_MIN by flattening the hierarchical index
@@ -226,8 +227,6 @@ def load_cell_expression_u133p2(ncols=None, scaling='std', add_prefix=True, use_
         df = pd.read_csv(path, sep='\t', engine='c')
         global_cache[path] = df
 
-    df['CELLNAME'] = df['CELLNAME'].apply(lambda x: x.replace(':', '.'))
-
     if use_landmark_genes:
         lincs_path = get_file(DATA_URL + 'lincs1000.tsv')
         df_l1000 = pd.read_csv(lincs_path, sep='\t')
@@ -235,6 +234,8 @@ def load_cell_expression_u133p2(ncols=None, scaling='std', add_prefix=True, use_
         df = df[['CELLNAME'] + cols]
 
     df1 = df['CELLNAME']
+    df1 = df1.map(lambda x: x.replace(':', '.'))
+
     df2 = df.drop('CELLNAME', 1)
     if add_prefix:
         df2 = df2.add_prefix('expr.')
@@ -283,7 +284,6 @@ def load_cell_expression_5platform(ncols=None, scaling='std', add_prefix=True, u
         df = df[['CellLine'] + cols]
 
     df1 = df['CellLine']
-    df1 = df1.map(lambda x: x.replace('.', ':'))
     df1.name = 'CELLNAME'
 
     df2 = df.drop('CellLine', 1)
@@ -325,7 +325,6 @@ def load_cell_mirna(ncols=None, scaling='std', add_prefix=True):
         global_cache[path] = df
 
     df1 = df['CellLine']
-    df1 = df1.map(lambda x: x.replace('.', ':'))
     df1.name = 'CELLNAME'
 
     df2 = df.drop('CellLine', 1)
@@ -383,7 +382,8 @@ def load_cell_proteome(ncols=None, scaling='std', add_prefix=True):
 
     df = df.merge(df_k, left_index=True, right_index=True)
 
-    index = df.index.map(lambda x: x.replace('.', ':'))
+    # index = df.index.map(lambda x: x.replace('.', ':'))
+    index = df.index
 
     total = df.shape[1]
     if ncols and ncols < total:
