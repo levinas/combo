@@ -3,8 +3,8 @@
 from __future__ import division, print_function
 
 import collections
-import csv
 import logging
+import os
 import threading
 
 import numpy as np
@@ -13,42 +13,89 @@ import pandas as pd
 from itertools import cycle, islice
 
 import keras
+from keras import backend as K
+from keras import optimizers
 from keras.models import Model
 from keras.layers import Input, Dense, Dropout
-from keras.callbacks import Callback, ModelCheckpoint
+from keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, TensorBoard
 
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
 
+import argparser
 from datasets import NCI60
 
 
 logger = logging.getLogger(__name__)
-logger.addHandler(logging.StreamHandler())
-logger.setLevel(logging.INFO)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-SEED = 2017
-CATEGORICAL = 1
+def set_seed(seed):
+    os.environ['PYTHONHASHSEED'] = '0'
+    np.random.seed(seed)
 
-BATCH_SIZE = 128
-NB_EPOCH = 500
+    import random
+    random.seed(seed)
 
-FEATURE_SUBSAMPLE = 500
-DROP = 0.1
-ACTIVATION = 'relu'
-
-L1 = 1000
-L2 = 100
-L3 = 100
-L4 = 0
-
-HDF_FILE = 'combo.h5'
+    if K.backend() == 'tensorflow':
+        import tensorflow as tf
+        session_conf = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1)
+        tf.set_random_seed(seed)
+        sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
+        K.set_session(sess)
 
 
-np.set_printoptions(threshold=np.nan)
-np.random.seed(SEED)
+def verify_path(path):
+    folder = os.path.dirname(path)
+    if folder and not os.path.exists(folder):
+        os.makedirs(folder)
+
+
+def set_up_logger(logfile, verbose):
+    verify_path(logfile)
+    fh = logging.FileHandler(logfile)
+    fh.setFormatter(logging.Formatter("[%(asctime)s %(process)d] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    fh.setLevel(logging.DEBUG)
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(logging.Formatter(''))
+    sh.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+
+
+
+def extension_from_parameters(args):
+    """Construct string for saving model with annotation of parameters"""
+    ext = ''
+    ext += '.A={}'.format(args.activation)
+    ext += '.B={}'.format(args.batch_size)
+    ext += '.E={}'.format(args.epochs)
+    ext += '.O={}'.format(args.optimizer)
+    # ext += '.LEN={}'.format(args.maxlen)
+    ext += '.LR={}'.format(args.learning_rate)
+    ext += '.CF={}'.format(''.join([x[0] for x in sorted(args.cell_features)]))
+    ext += '.DF={}'.format(''.join([x[0] for x in sorted(args.drug_features)]))
+    if args.feature_subsample > 0:
+        ext += '.FS={}'.format(args.feature_subsample)
+    if args.dropout > 0:
+        ext += '.DR={}'.format(args.dropout)
+    if args.warmup_lr:
+        ext += '.wu_lr'
+    if args.reduce_lr:
+        ext += '.re_lr'
+    if args.residual:
+        ext += '.res'
+    if args.use_landmark_genes:
+        ext += '.L1000'
+    for i, n in enumerate(args.dense_layers):
+        if n > 0:
+            ext += '.D{}={}'.format(i+1, n)
+
+    return ext
 
 
 class ComboDataLoader(object):
@@ -247,6 +294,16 @@ def test_generator(loader):
     print(y.shape)
 
 
+class LoggingCallback(Callback):
+    def __init__(self, print_fcn=print):
+        Callback.__init__(self)
+        self.print_fcn = print_fcn
+
+    def on_epoch_end(self, epoch, logs={}):
+        msg = "[Epoch: %i] %s" % (epoch, ", ".join("%s: %f" % (k, v) for k, v in sorted(logs.items())))
+        self.print_fcn(msg)
+
+
 def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
                         activation='relu', residual=False):
     x_input = Input(shape=input_shape)
@@ -264,20 +321,31 @@ def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
 
 
 def main():
-    loader = ComboDataLoader(seed=SEED, use_landmark_genes=True)
+    description = 'Build neural network based models to predict tumor response to drug pairs.'
+    parser = argparser.get_parser(description)
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+    ext = extension_from_parameters(args)
+    prefix = args.save + ext
+    logfile = args.logfile if args.logfile else prefix+'.log'
+    set_up_logger(logfile, args.verbose)
+    logger.info(args)
+
+    loader = ComboDataLoader(seed=args.seed, use_landmark_genes=args.use_landmark_genes)
     # test_generator(loader)
 
     batch_size = 32
     dense_layers = [1000, 1000]
-    residual = False
+    residual = True
     activation = 'relu'
     epochs = 10
 
-    train_gen = ComboDataGenerator(loader, batch_size=batch_size).flow()
-    val_gen = ComboDataGenerator(loader, partition='val', batch_size=batch_size).flow()
+    train_gen = ComboDataGenerator(loader, batch_size=args.batch_size).flow()
+    val_gen = ComboDataGenerator(loader, partition='val', batch_size=args.batch_size).flow()
 
-    train_steps = int(loader.n_train / batch_size)
-    val_steps = int(loader.n_val / batch_size)
+    train_steps = int(loader.n_train / args.batch_size)
+    val_steps = int(loader.n_val / args.batch_size)
 
     input_models = {}
     for fea_type, shape in loader.feature_shapes.items():
@@ -298,10 +366,10 @@ def main():
     merged = keras.layers.concatenate(encoded_inputs)
 
     h = merged
-    for i, layer in enumerate(dense_layers):
+    for i, layer in enumerate(args.dense_layers):
         x = h
-        h = Dense(layer, activation=activation)(h)
-        if residual:
+        h = Dense(layer, activation=args.activation)(h)
+        if args.residual:
             try:
                 h = keras.layers.add([h, x])
             except ValueError:
@@ -310,11 +378,52 @@ def main():
 
     model = Model(inputs, output)
     model.summary()
-    model.compile(loss='mse', optimizer='adam')
+
+    if args.cp:
+        model_json = model.to_json()
+        with open(prefix+'.model.json', 'w') as f:
+            print(model_json, file=f)
+
+    optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
+    base_lr = args.base_lr or K.get_value(optimizer.lr)
+    if args.learning_rate:
+        K.set_value(optimizer.lr, args.learning_rate)
+
+    model.compile(loss=args.loss, optimizer=optimizer)
+
+    def warmup_scheduler(epoch):
+        lr = args.learning_rate or base_lr * args.batch_size/100
+        if epoch <= 5:
+            K.set_value(model.optimizer.lr, (base_lr * (5-epoch) + lr * epoch) / 5)
+        logger.debug('Epoch {}: lr={}'.format(epoch, K.get_value(model.optimizer.lr)))
+        return K.get_value(model.optimizer.lr)
+
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
+    warmup_lr = LearningRateScheduler(warmup_scheduler)
+    checkpointer = ModelCheckpoint(args.save+ext+'.weights.h5', save_best_only=True, save_weights_only=True)
+    tensorboard = TensorBoard(log_dir="tb/tb{}".format(ext))
+    history_logger = LoggingCallback(logger.debug)
+
+    callbacks = [history_logger]
+    if args.reduce_lr:
+        callbacks.append(reduce_lr)
+    if args.warmup_lr:
+        callbacks.append(warmup_lr)
+    if args.cp:
+        callbacks.append(checkpointer)
+    if args.tb:
+        callbacks.append(tensorboard)
 
     model.fit_generator(train_gen, train_steps, epochs=epochs,
                         validation_data=val_gen, validation_steps=val_steps)
 
+    if args.cp:
+        model.save(prefix+'.model.h5')
+
+    logger.handlers = []
+
 
 if __name__ == '__main__':
     main()
+    if K.backend() == 'tensorflow':
+        K.clear_session()
