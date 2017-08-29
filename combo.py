@@ -354,6 +354,20 @@ class LoggingCallback(Callback):
         self.print_fcn(msg)
 
 
+class LossHistory(Callback):
+    def on_train_begin(self, logs={}):
+        self.val_losses = []
+        self.best_val_loss = np.Inf
+        self.best_model = None
+
+    def on_batch_end(self, batch, logs={}):
+        val_loss = logs.get('val_loss')
+        self.val_losses.append(val_loss)
+        if val_loss < self.best_val_loss:
+            self.best_model = self.model
+            self.best_val_loss = val_loss
+
+
 def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
                         activation='relu', residual=False):
     x_input = Input(shape=input_shape)
@@ -448,8 +462,9 @@ def main():
     checkpointer = ModelCheckpoint(args.save+ext+'.weights.h5', save_best_only=True, save_weights_only=True)
     tensorboard = TensorBoard(log_dir="tb/tb{}".format(ext))
     history_logger = LoggingCallback(logger.debug)
+    history = LossHistory()
 
-    callbacks = [history_logger]
+    callbacks = [history_logger, history]
     if args.reduce_lr:
         callbacks.append(reduce_lr)
     if args.warmup_lr:
