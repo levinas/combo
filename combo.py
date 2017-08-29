@@ -362,6 +362,20 @@ def log_evaluation(metric_outputs, description='Comparing y_true and y_pred:'):
         logger.info('  {}: {:.4f}'.format(metric, value))
 
 
+def plot_history(out, history, metric='loss', title=None):
+    title = title or 'model {}'.format(metric)
+    val_metric = 'val_{}'.format(metric)
+    plt.figure(figsize=(16, 9))
+    plt.plot(history.history[metric])
+    plt.plot(history.history[val_metric])
+    plt.title(title)
+    plt.ylabel(metric)
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
+    png = '{}.plot.{}.png'.format(out, metric)
+    plt.savefig(png, bbox_inches='tight')
+
+
 class LoggingCallback(Callback):
     def __init__(self, print_fcn=print):
         Callback.__init__(self)
@@ -372,7 +386,7 @@ class LoggingCallback(Callback):
         self.print_fcn(msg)
 
 
-class LossHistory(Callback):
+class ModelRecorder(Callback):
     def on_train_begin(self, logs={}):
         self.val_losses = []
         self.best_val_loss = np.Inf
@@ -480,9 +494,9 @@ def main():
     checkpointer = ModelCheckpoint(args.save+ext+'.weights.h5', save_best_only=True, save_weights_only=True)
     tensorboard = TensorBoard(log_dir="tb/tb{}".format(ext))
     history_logger = LoggingCallback(logger.debug)
-    history = LossHistory()
+    model_recorder = ModelRecorder()
 
-    callbacks = [history_logger, history]
+    callbacks = [history_logger, model_recorder]
     if args.reduce_lr:
         callbacks.append(reduce_lr)
     if args.warmup_lr:
@@ -493,29 +507,32 @@ def main():
         callbacks.append(tensorboard)
 
     if args.gen:
-        model.fit_generator(train_gen, train_steps,
-                            epochs=args.epochs,
-                            callbacks=callbacks,
-                            validation_data=val_gen, validation_steps=val_steps)
+        history = model.fit_generator(train_gen, train_steps,
+                                      epochs=args.epochs,
+                                      callbacks=callbacks,
+                                      validation_data=val_gen, validation_steps=val_steps)
     else:
         x_train_list, y_train, x_val_list, y_val = loader.load_data()
         y_shuf = np.random.permutation(y_val)
         log_evaluation(evaluate_prediction(y_val, y_shuf),
                        description='Between random pairs in y_val:')
-        model.fit(x_train_list, y_train,
+        history = model.fit(x_train_list, y_train,
                   batch_size=args.batch_size,
                   shuffle=args.shuffle,
                   epochs=args.epochs,
                   callbacks=callbacks,
                   validation_data=(x_val_list, y_val))
 
-    best_model = history.best_model
+    best_model = model_recorder.best_model
     if not args.gen:
         y_val_pred = model.predict(x_val_list, batch_size=args.batch_size).flatten()
         log_evaluation(evaluate_prediction(y_val, y_val_pred))
 
     if args.cp:
         best_model.save(prefix+'.model.h5')
+
+    plot_history(prefix, history, 'loss')
+    plot_history(prefix, history, 'r2')
 
     logger.handlers = []
 
