@@ -91,6 +91,8 @@ def extension_from_parameters(args):
         ext += '.res'
     if args.use_landmark_genes:
         ext += '.L1000'
+    if args.no_gen:
+        ext += '.ng'
     for i, n in enumerate(args.dense_layers):
         if n > 0:
             ext += '.D{}={}'.format(i+1, n)
@@ -489,7 +491,7 @@ def main():
                             validation_data=val_gen, validation_steps=val_steps)
 
     if args.cp:
-        model.save(prefix+'.model.h5')
+        history.best_model.save(prefix+'.model.h5')
 
     logger.handlers = []
 
