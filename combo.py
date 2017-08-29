@@ -93,6 +93,8 @@ def extension_from_parameters(args):
         ext += '.res'
     if args.use_landmark_genes:
         ext += '.L1000'
+    if args.use_combo_score:
+        ext += '.scr'
     if args.gen:
         ext += '.gen'
     for i, n in enumerate(args.dense_layers):
