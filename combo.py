@@ -271,11 +271,12 @@ class ComboDataLoader(object):
             y = self.df_response['GROWTH'].values
             # kf = KFold(n_splits=cv)
             # splits = kf.split(y)
-            skf = StratifiedKFold(n_splits=cv)
+            skf = StratifiedKFold(n_splits=cv, random_state=seed)
             splits = skf.split(y, discretize(y, bins=cv))
             self.cv_train_indexes = []
             self.cv_val_indexes = []
             for index, (train_index, val_index) in enumerate(splits):
+                print(index, train_index)
                 self.cv_train_indexes.append(train_index)
                 self.cv_val_indexes.append(val_index)
 
@@ -310,6 +311,8 @@ class ComboDataLoader(object):
     def load_data_cv(self, fold):
         train_index = self.cv_train_indexes[fold]
         val_index = self.cv_val_indexes[fold]
+        # print('fold', fold)
+        # print(train_index[:5])
         return self.load_data_by_index(train_index, val_index)
 
     def load_data(self):
@@ -380,14 +383,12 @@ class ComboDataGenerator(object):
             for fea in self.data.cell_features:
                 df_cell = getattr(self.data, self.data.cell_df_dict[fea])
                 df_x = pd.merge(df[['CELLNAME']], df_cell, on='CELLNAME', how='left')
-                # print(df_x.head(5))
                 x_list.append(df_x.drop(['CELLNAME'], axis=1).values)
 
             for drug in ['NSC1', 'NSC2']:
                 for fea in self.data.drug_features:
                     df_drug = getattr(self.data, self.data.drug_df_dict[fea])
                     df_x = pd.merge(df[[drug]], df_drug, left_on=drug, right_on='NSC', how='left')
-                    # print(df_x.head(5))
                     x_list.append(df_x.drop([drug, 'NSC'], axis=1).values)
 
             yield x_list, y
@@ -561,11 +562,6 @@ def main():
         with open(prefix+'.model.json', 'w') as f:
             print(model_json, file=f)
 
-    optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
-    base_lr = args.base_lr or K.get_value(optimizer.lr)
-    if args.learning_rate:
-        K.set_value(optimizer.lr, args.learning_rate)
-
     def warmup_scheduler(epoch):
         lr = args.learning_rate or base_lr * args.batch_size/100
         if epoch <= 5:
@@ -585,6 +581,12 @@ def main():
             cv_ext = '.cv{}'.format(fold+1)
 
         model = build_model(loader, args)
+
+        optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
+        base_lr = args.base_lr or K.get_value(optimizer.lr)
+        if args.learning_rate:
+            K.set_value(optimizer.lr, args.learning_rate)
+
         model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
 
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
@@ -630,7 +632,7 @@ def main():
             y_val_pred = best_model.predict(x_val_list, batch_size=args.batch_size).flatten()
             scores = evaluate_prediction(y_val, y_val_pred)
             if scores[args.loss] > args.max_val_loss:
-                logger.warn('Final val_loss {} is greater than {}; retrain the model...'.format(scores[args.loss], args.max_val_loss))
+                logger.warn('Best val_loss {} is greater than {}; retrain the model...'.format(scores[args.loss], args.max_val_loss))
                 continue
             else:
                 fold += 1
