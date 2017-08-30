@@ -20,6 +20,7 @@ from keras.models import Model
 from keras.layers import Input, Dense, Dropout
 from keras.callbacks import Callback, ModelCheckpoint, ReduceLROnPlateau, LearningRateScheduler, TensorBoard
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.model_selection import KFold, StratifiedKFold
 from scipy.stats.stats import pearsonr
 
 import matplotlib as mpl
@@ -69,7 +70,6 @@ def set_up_logger(logfile, verbose):
     logger.addHandler(sh)
 
 
-
 def extension_from_parameters(args):
     """Construct string for saving model with annotation of parameters"""
     ext = ''
@@ -104,6 +104,13 @@ def extension_from_parameters(args):
     return ext
 
 
+def discretize(y, bins=5):
+    percentiles = [100 / bins * (i + 1) for i in range(bins - 1)]
+    thresholds = [np.percentile(y, x) for x in percentiles]
+    classes = np.digitize(y, thresholds)
+    return classes
+
+
 class ComboDataLoader(object):
     """Load merged drug response, drug descriptors and cell line essay data
     """
@@ -111,7 +118,7 @@ class ComboDataLoader(object):
     def __init__(self, seed, val_split=0.2, shuffle=True,
                  cell_features=['expression'], drug_features=['descriptors'],
                  use_landmark_genes=False, use_combo_score=False,
-                 feature_subsample=None, scaling='std', scramble=False):
+                 feature_subsample=None, scaling='std', scramble=False, cv=0):
         """Initialize data merging drug response, drug descriptors and cell line essay.
            Shuffle and split training and validation set
 
@@ -260,7 +267,58 @@ class ComboDataLoader(object):
         self.input_dim = sum([np.prod(self.feature_shapes[x]) for x in self.input_features.values()])
         logger.info('Total input dimensions: {}'.format(self.input_dim))
 
+        if cv > 1:
+            y = self.df_response['GROWTH'].values
+            # kf = KFold(n_splits=cv)
+            # splits = kf.split(y)
+            skf = StratifiedKFold(n_splits=cv)
+            splits = skf.split(y, discretize(y, bins=cv))
+            self.cv_train_indexes = []
+            self.cv_val_indexes = []
+            for index, (train_index, val_index) in enumerate(splits):
+                self.cv_train_indexes.append(train_index)
+                self.cv_val_indexes.append(val_index)
+
+    def load_data_all(self):
+        df_all = self.df_response
+        y_all = df_all['GROWTH'].values
+        x_all_list = []
+
+        for fea in self.cell_features:
+            df_cell = getattr(self, self.cell_df_dict[fea])
+            df_x_all = pd.merge(df_all[['CELLNAME']], df_cell, on='CELLNAME', how='left')
+            x_all_list.append(df_x_all.drop(['CELLNAME'], axis=1).values)
+
+        for drug in ['NSC1', 'NSC2']:
+            for fea in self.drug_features:
+                df_drug = getattr(self, self.drug_df_dict[fea])
+                df_x_all = pd.merge(df_all[[drug]], df_drug, left_on=drug, right_on='NSC', how='left')
+                x_all_list.append(df_x_all.drop([drug, 'NSC'], axis=1).values)
+
+        return x_all_list, y_all, df_all
+
+    def load_data_by_index(self, train_index, val_index):
+        x_all_list, y_all, df_all = self.load_data_all()
+        x_train_list = [x[train_index] for x in x_all_list]
+        x_val_list = [x[val_index] for x in x_all_list]
+        y_train = y_all[train_index]
+        y_val = y_all[val_index]
+        df_train = df_all.iloc[train_index, :]
+        df_val = df_all.iloc[val_index, :]
+        return x_train_list, y_train, x_val_list, y_val, df_train, df_val
+
+    def load_data_cv(self, fold):
+        train_index = self.cv_train_indexes[fold]
+        val_index = self.cv_val_indexes[fold]
+        return self.load_data_by_index(train_index, val_index)
+
     def load_data(self):
+        train_index = range(self.n_train)
+        val_index = range(self.n_train, self.total)
+        return self.load_data_by_index(train_index, val_index)
+
+    def load_data_old(self):
+        # bad performance (4x slow) possibly due to incontiguous data
         df_train = self.df_response.iloc[:self.n_train, :]
         df_val = self.df_response.iloc[self.n_train:, :]
 
@@ -434,11 +492,12 @@ def build_feature_model(input_shape, name='', dense_layers=[1000, 1000],
     return model
 
 
-def build_model(loader, args):
+def build_model(loader, args, verbose=False):
     input_models = {}
     for fea_type, shape in loader.feature_shapes.items():
         box = build_feature_model(input_shape=shape, name=fea_type, dense_layers=args.dense_layers)
-        box.summary()
+        if verbose:
+            box.summary()
         input_models[fea_type] = box
 
     inputs = []
@@ -483,7 +542,8 @@ def main():
                              cell_features=args.cell_features,
                              drug_features=args.drug_features,
                              use_landmark_genes=args.use_landmark_genes,
-                             use_combo_score=args.use_combo_score)
+                             use_combo_score=args.use_combo_score,
+                             cv=args.cv)
     # test_loader(loader)
     # test_generator(loader)
 
@@ -493,7 +553,7 @@ def main():
     train_steps = int(loader.n_train / args.batch_size)
     val_steps = int(loader.n_val / args.batch_size)
 
-    model = build_model(loader, args)
+    model = build_model(loader, args, verbose=True)
     model.summary()
 
     if args.cp:
@@ -506,8 +566,6 @@ def main():
     if args.learning_rate:
         K.set_value(optimizer.lr, args.learning_rate)
 
-    model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
-
     def warmup_scheduler(epoch):
         lr = args.learning_rate or base_lr * args.batch_size/100
         if epoch <= 5:
@@ -515,51 +573,84 @@ def main():
         logger.debug('Epoch {}: lr={}'.format(epoch, K.get_value(model.optimizer.lr)))
         return K.get_value(model.optimizer.lr)
 
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
-    warmup_lr = LearningRateScheduler(warmup_scheduler)
-    checkpointer = ModelCheckpoint(prefix+'.weights.h5', save_best_only=True, save_weights_only=True)
-    tensorboard = TensorBoard(log_dir="tb/tb{}".format(ext))
-    history_logger = LoggingCallback(logger.debug)
-    model_recorder = ModelRecorder()
+    df_pred_list = []
 
-    callbacks = [history_logger, model_recorder]
-    if args.reduce_lr:
-        callbacks.append(reduce_lr)
-    if args.warmup_lr:
-        callbacks.append(warmup_lr)
-    if args.cp:
-        callbacks.append(checkpointer)
-    if args.tb:
-        callbacks.append(tensorboard)
+    cv_ext = ''
+    cv = args.cv if args.cv > 1 else 1
 
-    if args.gen:
-        history = model.fit_generator(train_gen, train_steps,
-                                      epochs=args.epochs,
-                                      callbacks=callbacks,
-                                      validation_data=val_gen, validation_steps=val_steps)
-    else:
-        x_train_list, y_train, x_val_list, y_val, df_train, df_val = loader.load_data()
-        y_shuf = np.random.permutation(y_val)
-        log_evaluation(evaluate_prediction(y_val, y_shuf),
-                       description='Between random pairs in y_val:')
-        history = model.fit(x_train_list, y_train,
-                  batch_size=args.batch_size,
-                  shuffle=args.shuffle,
-                  epochs=args.epochs,
-                  callbacks=callbacks,
-                  validation_data=(x_val_list, y_val))
+    fold = 0
+    while fold < cv:
+        if args.cv > 1:
+            logger.info('Cross validation fold {}/{}:'.format(fold+1, cv))
+            cv_ext = '.cv{}'.format(fold+1)
 
-    best_model = model_recorder.best_model
-    if not args.gen:
-        y_val_pred = best_model.predict(x_val_list, batch_size=args.batch_size).flatten()
-        log_evaluation(evaluate_prediction(y_val, y_val_pred))
-        df_val['GROWTH_PRED'] = y_val_pred
+        model = build_model(loader, args)
+        model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
 
-    if args.cp:
-        best_model.save(prefix+'.model.h5')
+        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
+        warmup_lr = LearningRateScheduler(warmup_scheduler)
+        checkpointer = ModelCheckpoint(prefix+cv_ext+'.weights.h5', save_best_only=True, save_weights_only=True)
+        tensorboard = TensorBoard(log_dir="tb/tb{}{}".format(ext, cv_ext))
+        history_logger = LoggingCallback(logger.debug)
+        model_recorder = ModelRecorder()
 
-    plot_history(prefix, history, 'loss')
-    plot_history(prefix, history, 'r2')
+        callbacks = [history_logger, model_recorder]
+        if args.reduce_lr:
+            callbacks.append(reduce_lr)
+        if args.warmup_lr:
+            callbacks.append(warmup_lr)
+        if args.cp:
+            callbacks.append(checkpointer)
+        if args.tb:
+            callbacks.append(tensorboard)
+
+        if args.gen:
+            history = model.fit_generator(train_gen, train_steps,
+                                          epochs=args.epochs,
+                                          callbacks=callbacks,
+                                          validation_data=val_gen, validation_steps=val_steps)
+        else:
+            if args.cv > 1:
+                x_train_list, y_train, x_val_list, y_val, df_train, df_val = loader.load_data_cv(fold)
+            else:
+                x_train_list, y_train, x_val_list, y_val, df_train, df_val = loader.load_data()
+
+            y_shuf = np.random.permutation(y_val)
+            log_evaluation(evaluate_prediction(y_val, y_shuf),
+                           description='Between random pairs in y_val:')
+            history = model.fit(x_train_list, y_train,
+                                batch_size=args.batch_size,
+                                shuffle=args.shuffle,
+                                epochs=args.epochs,
+                                callbacks=callbacks,
+                                validation_data=(x_val_list, y_val))
+
+        best_model = model_recorder.best_model
+        if not args.gen:
+            y_val_pred = best_model.predict(x_val_list, batch_size=args.batch_size).flatten()
+            scores = evaluate_prediction(y_val, y_val_pred)
+            if scores[args.loss] > args.max_val_loss:
+                logger.warn('Final val_loss {} is greater than {}; retrain the model...'.format(scores[args.loss], args.max_val_loss))
+                continue
+            else:
+                fold += 1
+            log_evaluation(scores)
+            df_val.is_copy = False
+            df_val['GROWTH_PRED'] = y_val_pred
+            df_val['GROWTH_ERROR'] = y_val_pred - y_val
+            df_pred_list.append(df_val)
+
+        if args.cp:
+            best_model.save(prefix+'.model.h5')
+
+        plot_history(prefix, history, 'loss')
+        plot_history(prefix, history, 'r2')
+
+    pred_fname = 'predicted.growth.tsv'
+    if args.use_combo_score:
+        pred_fname = 'predicted.score.tsv'
+    df_pred = pd.concat(df_pred_list)
+    df_pred.to_csv(pred_fname, sep='\t', index=False, float_format='%.4g')
 
     logger.handlers = []
 
